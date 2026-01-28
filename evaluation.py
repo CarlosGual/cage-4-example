@@ -1,4 +1,3 @@
-import inspect
 import time
 from statistics import mean, stdev
 

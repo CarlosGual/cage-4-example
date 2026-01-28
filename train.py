@@ -21,7 +21,7 @@ HYPER_PARAMS = SimpleNamespace(
     workers = 25,       # How many envs can run in parallel
     bs = 2500,          # How many steps to learn from at a time
     episode_len = 500,
-    training_episodes = 500_000, # Realistically, stops improving around 50k
+    training_episodes = 1_000, # Realistically, stops improving around 50k
     epochs = 4
 )
 
