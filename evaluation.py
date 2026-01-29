@@ -15,6 +15,8 @@ import json
 import sys
 import os
 
+from models.video_recorder import IMAGEIO_AVAILABLE, VideoRecorder
+
 cyborg_version = CYBORG_VERSION
 EPISODE_LENGTH = 500
 
@@ -346,6 +348,123 @@ def run_evaluation(submission, log_path, max_eps=100, write_to_file=False, seed=
             scores.write(f"reward_stdev: {reward_stdev}\n")
 
 
+def run_evaluation_with_video(submission, log_path, max_eps=1, seed=None, fps=10, frame_skip=1):
+    """Run evaluation and record video of the environment.
+
+    Parameters
+    ----------
+    submission : Submission
+        The submission to evaluate.
+    log_path : str
+        Path to save output files and videos.
+    max_eps : int
+        Number of episodes to record (default=1, since video recording is slow).
+    seed : int, optional
+        Random seed for reproducibility.
+    fps : int
+        Frames per second for the output video (default=10).
+    frame_skip : int
+        Record every N steps (default=1, record every step).
+    """
+    if not IMAGEIO_AVAILABLE:
+        raise ImportError("Video recording requires imageio. Install with: pip install imageio imageio-ffmpeg")
+
+    cyborg_version = CYBORG_VERSION
+    EPISODE_LENGTH = 500
+    scenario = "Scenario4"
+
+    version_header = f"CybORG v{cyborg_version}, {scenario}"
+    author_header = f"Author: {submission.NAME}, Team: {submission.TEAM}, Technique: {submission.TECHNIQUE}"
+
+    sg = EnterpriseScenarioGenerator(
+        blue_agent_class=SleepAgent,
+        green_agent_class=EnterpriseGreenAgent,
+        red_agent_class=FiniteStateRedAgent,
+        steps=EPISODE_LENGTH,
+    )
+    cyborg = CybORG(sg, "sim", seed=seed)
+    wrapped_cyborg = submission.wrap(cyborg)
+
+    print(version_header)
+    print(author_header)
+    print(f"Recording {max_eps} episode(s) to video with FPS={fps}, frame_skip={frame_skip}")
+    print(f"Using agents {submission.AGENTS}")
+
+    if not log_path.endswith("/"):
+        log_path += "/"
+    print(f"Videos will be saved to {log_path}")
+
+    start = datetime.now()
+
+    total_rewards = []
+
+    for episode in range(max_eps):
+        print(f"\n=== Recording Episode {episode + 1}/{max_eps} ===")
+
+        # Reset environment
+        observations, _ = wrapped_cyborg.reset()
+
+        # Initialize video recorder after reset (so network is set up properly)
+        recorder = VideoRecorder(cyborg, log_path, fps=fps)
+
+        # Capture initial frame
+        recorder.capture_frame(step=0, reward=0.0)
+
+        episode_rewards = []
+
+        for step in tqdm(range(EPISODE_LENGTH), desc=f"Episode {episode + 1}"):
+            actions = {
+                agent_name: agent.get_action(
+                    observations[agent_name], wrapped_cyborg.action_space(agent_name)
+                )
+                for agent_name, agent in submission.AGENTS.items()
+                if agent_name in wrapped_cyborg.agents
+            }
+
+            observations, rew, term, trunc, info = wrapped_cyborg.step(actions)
+
+            step_reward = mean(rew.values())
+            episode_rewards.append(step_reward)
+
+            # Capture frame (with optional frame skipping)
+            if (step + 1) % frame_skip == 0:
+                recorder.capture_frame(step=step + 1, reward=sum(episode_rewards))
+
+            done = {
+                agent: term.get(agent, False) or trunc.get(agent, False)
+                for agent in wrapped_cyborg.agents
+            }
+            if all(done.values()):
+                # Capture final frame
+                recorder.capture_frame(step=step + 1, reward=sum(episode_rewards))
+                break
+
+        total_episode_reward = sum(episode_rewards)
+        total_rewards.append(total_episode_reward)
+
+        # Save video for this episode
+        video_filename = f"episode_{episode + 1}_reward_{total_episode_reward:.2f}.mp4"
+        recorder.save_video(video_filename)
+
+        print(f"Episode {episode + 1} finished with reward: {total_episode_reward:.2f}")
+
+    end = datetime.now()
+    difference = end - start
+
+    if len(total_rewards) > 1:
+        reward_mean = mean(total_rewards)
+        reward_stdev = stdev(total_rewards)
+    else:
+        reward_mean = total_rewards[0] if total_rewards else 0
+        reward_stdev = 0
+
+    print(f"\n=== Video Recording Complete ===")
+    print(f"Recorded {max_eps} episode(s)")
+    print(f"Average reward: {reward_mean:.2f} (std: {reward_stdev:.2f})")
+    print(f"Total time: {difference}")
+    print(f"Videos saved to: {log_path}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -364,6 +483,22 @@ if __name__ == "__main__":
         '--distribute', type=int, default=1, help="How many parallel workers to use"
     )
     parser.add_argument("--max-eps", type=int, default=100, help="Max episodes to run")
+
+    # Video recording options
+    parser.add_argument(
+        "--record-video",
+        action="store_true",
+        help="Record video of the evaluation (runs single-threaded, slower)"
+    )
+    parser.add_argument(
+        "--video-fps", type=int, default=10,
+        help="Frames per second for video output (default: 10)"
+    )
+    parser.add_argument(
+        "--frame-skip", type=int, default=1,
+        help="Record every N steps to reduce video size (default: 1 = every step)"
+    )
+
     args = parser.parse_args()
     args.output_path = os.path.abspath('tmp')
     args.submission_path = os.path.abspath('')
@@ -378,7 +513,17 @@ if __name__ == "__main__":
 
     submission = load_submission(args.submission_path)
 
-    if args.distribute == 1:
+    if args.record_video:
+        # Video recording mode (single-threaded)
+        run_evaluation_with_video(
+            submission,
+            log_path=args.output_path,
+            max_eps=args.max_eps,
+            seed=args.seed,
+            fps=args.video_fps,
+            frame_skip=args.frame_skip
+        )
+    elif args.distribute == 1:
         run_evaluation(
             submission, max_eps=args.max_eps, log_path=args.output_path, seed=args.seed
         )
